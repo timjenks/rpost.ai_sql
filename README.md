@@ -10,6 +10,14 @@ This project is designed to manage the ETL process of data from RPost production
 
 Do not use -P with argument to pass password
 
+## Notes
+
+### Permissions Issues
+
+List full path permissions
+
+    namei -l <file_path>
+
 ## Scripts
 
 sql_restore.sh

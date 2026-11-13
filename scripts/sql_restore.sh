@@ -112,9 +112,10 @@ SQL_ARGS=(-S "$SERVER" -b -r 1 -l 30)
 [[ -n $SQLUSER ]] && SQL_ARGS+=(-U "$SQLUSER")
 ((TRUST_CERT)) && SQL_ARGS+=(-C)
 run_sql() { "$SQLCMD" "${SQL_ARGS[@]}" -Q "$1"; }
-# Output rows as TAB-separated fields, no headings; trim sqlcmd padding.
+# Tab-separated rows, no headings. sqlcmd 18 rejects -y/-Y together with -W.
+# Default -Y is already unlimited for nvarchar, which covers logical and physical names.
 query_tsv() {
-  "$SQLCMD" "${SQL_ARGS[@]}" -h -1 -W -s $'\t' -y 0 -Y 0 -Q "SET NOCOUNT ON; $1" \
+  "$SQLCMD" "${SQL_ARGS[@]}" -h -1 -W -s $'\t' -w 65535 -Q "SET NOCOUNT ON; $1" \
     | sed '/^[[:space:]]*$/d' | sed '/^([0-9][0-9]* rows\{0,1\} affected)$/d'
 }
 trim() {
