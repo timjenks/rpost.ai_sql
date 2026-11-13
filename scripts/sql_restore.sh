@@ -36,15 +36,10 @@ Options:
 
 Example:
   export SQLCMDPASSWORD='your-secret'
-  ./restore_sqlserver.sh --server localhost --user sa --password-env SQLCMDPASSWORD \
+  ./sql_restore.sh --server localhost --user sa --password-env SQLCMDPASSWORD \
     --database SalesNew --backup-dir /var/opt/mssql/backups \
     --data-dir /var/opt/mssql/data --log-dir /var/opt/mssql/data \
     Sales_1.bak Sales_2.bak Sales_3.bak
-
-  ./restore_sqlserver.sh --server localhost --user sa --password-env SQLCMDPASSWORD \
-    --database SalesNew --backup-dir /var/opt/mssql/backups \
-    --data-dir /var/opt/mssql/data --log-dir /var/opt/mssql/data \
-    --backups-file sales_backups.txt
 
 Note: Paths refer to the SQL Server host, not necessarily the machine running this script.
 HELP
@@ -122,3 +117,80 @@ query_tsv() {
   "$SQLCMD" "${SQL_ARGS[@]}" -h -1 -W -s $'\t' -y 0 -Y 0 -Q "SET NOCOUNT ON; $1" \
     | sed '/^[[:space:]]*$/d' | sed '/^([0-9][0-9]* rows\{0,1\} affected)$/d'
 }
+trim() {
+  local s=$1
+  s=${s%$'\r'}
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+# Paths are on the SQL Server host. Backup, data, and log arguments are directories.
+host_path() {
+  local dir=${1%/}
+  dir=${dir%'\'}
+  printf '%s/%s' "$dir" "$2"
+}
+
+media_sql=''
+for p in "${PARTS[@]}"; do
+  piece=$(sqlstr "$(host_path "$BACKUP_DIR" "$p")")
+  [[ -n $media_sql ]] && media_sql+=', '
+  media_sql+="DISK = $piece"
+done
+
+log "Restoring $DB on $SERVER from ${#PARTS[@]} backup file(s) in $BACKUP_DIR (set $BACKUP_SET)"
+exists=$(query_tsv "SELECT CASE WHEN DB_ID($(sqlstr "$DB")) IS NULL THEN 0 ELSE 1 END")
+exists=$(trim "$exists")
+if [[ $exists == 1 ]]; then
+  ((REPLACE)) || fail "Database $DB already exists. Re-run with --replace to overwrite it."
+elif [[ $exists != 0 ]]; then
+  fail "Unexpected result checking for database $DB: ${exists:-<empty>}"
+fi
+
+if ((VERIFY)); then
+  log "Verifying backup"
+  run_sql "RESTORE VERIFYONLY FROM $media_sql WITH FILE = $BACKUP_SET"
+fi
+
+log "Reading logical files from the backup"
+filelist=$(query_tsv "RESTORE FILELISTONLY FROM $media_sql WITH FILE = $BACKUP_SET")
+[[ -n $(trim "$filelist") ]] || fail "RESTORE FILELISTONLY returned no files"
+
+moves=()
+dests=()
+while IFS=$'\t' read -r logical physical type _; do
+  logical=$(trim "$logical")
+  [[ -n $logical && $logical != LogicalName ]] || continue
+  physical=$(trim "$physical")
+  type=$(trim "$type")
+  base=${physical##*/}
+  base=${base##*'\'}
+  base=$(trim "$base")
+  [[ -n $base && $base != '.' && $base != '..' && $base != */* && $base != *'\'* ]] \
+    || fail "Cannot place backup file '$logical' (physical name: ${physical:-<empty>})"
+  case $type in
+    L|l) dest=$(host_path "$LOG_DIR" "$base");;
+    D|d|F|f|S|s) dest=$(host_path "$DATA_DIR" "$base");;
+    *) fail "Unknown file type '$type' for backup file '$logical'";;
+  esac
+  if ((${#dests[@]})); then
+    for existing in "${dests[@]}"; do
+      [[ $existing == "$dest" ]] && fail "Multiple backup files would be restored to $dest"
+    done
+  fi
+  dests+=("$dest")
+  moves+=("MOVE $(sqlstr "$logical") TO $(sqlstr "$dest")")
+  log "Place $logical at $dest"
+done <<< "$filelist"
+((${#moves[@]} > 0)) || fail "No files to restore"
+
+with="FILE = $BACKUP_SET"
+for m in "${moves[@]}"; do
+  with+=", $m"
+done
+with+=", STATS = 10"
+((REPLACE)) && with+=", REPLACE"
+
+log "Running RESTORE DATABASE"
+run_sql "RESTORE DATABASE $(sqlident "$DB") FROM $media_sql WITH $with"
+log "Restore complete (elapsed=$((SECONDS-started))s)"
